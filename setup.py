@@ -28,7 +28,8 @@ setup(name='talon',
           "numpy",
           "mock",
           "coverage",
-          "flanker"
+          "flanker",
+          "cssselect"
           ]
       )
 
