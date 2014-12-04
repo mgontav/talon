@@ -25,7 +25,7 @@ setup(name='talon',
           "dnspython==1.11.1",
           "html2text",
           "nose==1.3.1",
-          "numpy==1.6.1",
+          "numpy",
           "mock",
           "coverage",
           "flanker"
@@ -45,7 +45,7 @@ def install_pyml():
         return
 
     pyml_tarball = (
-        'http://garr.dl.sourceforge.net/project/pyml/PyML-0.7.13.3.tar.gz')
+        'http://cznic.dl.sourceforge.net/project/pyml/PyML-0.7.13.3.tar.gz')
     pyml_srcidr = 'PyML-0.7.13.3'
 
     # see if PyML tarball needs to be fetched:
