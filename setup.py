@@ -56,7 +56,7 @@ def install_pyml():
     # compile&install:
     with cd(pyml_srcidr):
         python('setup.py build')
-        python('setup.py install')
+        python('setup.py install --user')
 
 
 def run(command):
