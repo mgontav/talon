@@ -55,7 +55,7 @@ def install_pyml():
     # compile&install:
     with cd(pyml_srcidr):
         python('setup.py build')
-        python('setup.py install --user')
+        python('setup.py install --prefix=`pwd`/pips')
 
 
 def run(command):
