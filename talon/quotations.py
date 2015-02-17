@@ -85,7 +85,7 @@ SPLITTER_PATTERNS = [
     re.compile("(\d+/\d+/\d+|\d+\.\d+\.\d+).*@", re.VERBOSE),
     RE_ON_DATE_SMB_WROTE,
     RE_ON_DATE_SMB_WROTE_GOOGLE,
-    re.compile('(_+\r?\n)?[\s]*(:?[*]?From|Date|Sent|Subject|To):[*]? .*'),      #TODO: can lead to false positive easily!!
+    re.compile('(_+\r?\n)?[\s]*(:?[*]?From|Date|Sent|Subject|To|Cc):[*]? .*'),      #TODO: can lead to false positive easily!!
     re.compile('\S{3,10}, \d\d? \S{3,10} 20\d\d,? \d\d?:\d\d(:\d\d)?'
                '( \S+){3,6}@\S+:')
     ]
@@ -96,7 +96,7 @@ RE_NORMALIZED_LINK = re.compile('@@(http://[^>@]*)@@')
 
 RE_PARENTHESIS_LINK = re.compile("\(https?://")
 
-SPLITTER_MAX_LINES = 4
+SPLITTER_MAX_LINES = 5
 MAX_LINES_COUNT = 1000
 
 QUOT_PATTERN = re.compile('^>+ ?')
