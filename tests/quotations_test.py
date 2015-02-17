@@ -31,3 +31,7 @@ def test_crash_inside_extract_from():
 
 def test_empty_body():
     eq_('', quotations.extract_from_plain(''))
+
+
+def test_malformed_html():
+    eq_('</body></html>', quotations.extract_from_html('</body></html>'))

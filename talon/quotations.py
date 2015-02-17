@@ -6,6 +6,10 @@ original messages (without quoted messages)
 """
 
 import regex as re
+import re as re_orig
+# N.B. the regex module was originally used by mailgun in this repo, but it behaved
+# different from my expectations in a few cases where the re module behaved
+# as expected, so I use both -- Evan Lynch <evan.f.lynch@gmail.com>
 import logging
 from copy import deepcopy
 
@@ -16,11 +20,14 @@ from talon.constants import RE_DELIMITER
 from talon.utils import random_token, get_delimiter
 from talon import html_quotations
 
-
 log = logging.getLogger(__name__)
 
 
-RE_FWD = re.compile("^[-]+[ ]*Forwarded message[ ]*[-]+$", re.I | re.M)
+h = html2text.HTML2Text()
+h.body_width = 0
+textify_html = h.handle
+
+RE_FWD = re.compile("(([-]+[ ]*Forwarded message[ ]*[-]+)|(Begin forwarded message:))", re.I | re.M)
 
 RE_ON_DATE_SMB_WROTE = re.compile(
     r'''
@@ -31,6 +38,11 @@ RE_ON_DATE_SMB_WROTE = re.compile(
         .*(wrote|sent):
     )
     ''', re.VERBOSE)
+
+RE_ON_DATE_SMB_WROTE_GOOGLE = re.compile('On (Mon(day)?|Tue(s)?(day)?|Wed(nesday)?|Thur(sday)?|Fri(day)?|Sat(urday)?|Sun(day)?)'
+               ', (Jan(uary)?|Feb(ruary)?|Mar(ch)?|Apr(il)?|May|Jun(e)?|Jul(y)?|Aug(ust)?|Sep(t)?(ember)?|'
+               'Oct(ober?)|Nov(ember)?|Dec(ember)?) [0-9]{1,2}, [0-9]{4}'
+               ' at [0-9:]* (PM|AM), .* wrote:', re.I)
 
 RE_QUOTATION = re.compile(
     r'''
@@ -68,14 +80,12 @@ RE_EMPTY_QUOTATION = re.compile(
 
 SPLITTER_PATTERNS = [
     # ------Original Message------ or ---- Reply Message ----
-    re.compile("[\s]*[-]+[ ]*(Original|Reply) Message[ ]*[-]+", re.I),
+    re.compile("[\s ]*[-]+[ ]*(Original|Reply) Message[ ]*[-]+", re.I),
     # <date> <person>
     re.compile("(\d+/\d+/\d+|\d+\.\d+\.\d+).*@", re.VERBOSE),
     RE_ON_DATE_SMB_WROTE,
-    re.compile('(_+\r?\n)?[\s]*(:?[*]?From|Date):[*]? .*'),
-    re.compile('(_+\r?\n)?[\s]*(:?[*]?Van|Datum):[*]? .*'),
-    re.compile('(_+\r?\n)?[\s]*(:?[*]?De|Date):[*]? .*'),
-    re.compile('(_+\r?\n)?[\s]*(:?[*]?Von|Datum):[*]? .*'),
+    RE_ON_DATE_SMB_WROTE_GOOGLE,
+    re.compile('(_+\r?\n)?[\s]*(:?[*]?From|Date|Sent|Subject|To):[*]? .*'),      #TODO: can lead to false positive easily!!
     re.compile('\S{3,10}, \d\d? \S{3,10} 20\d\d,? \d\d?:\d\d(:\d\d)?'
                '( \S+){3,6}@\S+:')
     ]
@@ -104,6 +114,31 @@ def extract_from(msg_body, content_type='text/plain'):
 
     return msg_body
 
+def is_forward(line):
+    if RE_FWD.search(line):
+        return True
+    return False
+
+def is_empty(line):
+    if line.strip():
+        return False
+    return True
+
+def is_quote(line):
+    if QUOT_PATTERN.match(line):
+        return True
+    return False
+
+def is_splitter(line):
+    '''
+    Returns Matcher object if provided string is a splitter and
+    None otherwise.
+    '''
+    for pattern in SPLITTER_PATTERNS:
+        matcher = re.match(pattern, line)
+        if matcher:
+            return matcher
+    return False
 
 def mark_message_lines(lines):
     """Mark message lines with markers to distinguish quotation lines.
@@ -114,6 +149,7 @@ def mark_message_lines(lines):
     * m - line that starts with quotation marker '>'
     * s - splitter line
     * t - presumably lines from the last message in the conversation
+    * f - line indicating the beginning of a forwarded message
 
     >>> mark_message_lines(['answer', 'From: foo@bar.com', '', '> question'])
     'tsem'
@@ -121,12 +157,12 @@ def mark_message_lines(lines):
     markers = bytearray(len(lines))
     i = 0
     while i < len(lines):
-        if not lines[i].strip():
+        if is_empty(lines[i]):
             markers[i] = 'e'  # empty line
-        elif QUOT_PATTERN.match(lines[i]):
-            markers[i] = 'm'  # line with quotation marker
-        elif RE_FWD.match(lines[i]):
+        elif is_forward(lines[i]):
             markers[i] = 'f'  # ---- Forwarded message ----
+        elif is_quote(lines[i]):
+            markers[i] = 'm'  # line with quotation marker
         else:
             # in case splitter is spread across several lines
             splitter = is_splitter('\n'.join(lines[i:i + SPLITTER_MAX_LINES]))
@@ -149,7 +185,7 @@ def mark_message_lines(lines):
 def process_marked_lines(lines, markers, return_flags=[False, -1, -1]):
     """Run regexes against message's marked lines to strip quotations.
 
-    Return only last message lines.
+    Return all but the last quoted segment if it exists.
     >>> mark_message_lines(['Hello', 'From: foo@bar.com', '', '> Hi', 'tsem'])
     ['Hello']
 
@@ -157,40 +193,50 @@ def process_marked_lines(lines, markers, return_flags=[False, -1, -1]):
     return_flags = [were_lines_deleted, first_deleted_line,
                     last_deleted_line]
     """
-    # if there are no splitter there should be no markers
+    # Pre-process marker sequence
+
+    # if there are no splitter there should be no markers. However, allow markers if more than 3!
     if 's' not in markers and not re.search('(me*){3}', markers):
         markers = markers.replace('m', 't')
 
+    # Look for forwards (don't remove anything on a forward)
+
+    # if there is an f before the first split, then it's a forward.
     if re.match('[te]*f', markers):
         return_flags[:] = [False, -1, -1]
         return lines
 
-    # inlined reply
-    # use lookbehind assertions to find overlapping entries e.g. for 'mtmtm'
-    # both 't' entries should be found
-    for inline_reply in re.finditer('(?<=m)e*((?:t+e*)+)m', markers):
-        # long links could break sequence of quotation lines but they shouldn't
-        # be considered an inline reply
-        links = (
-            RE_PARENTHESIS_LINK.search(lines[inline_reply.start() - 1]) or
-            RE_PARENTHESIS_LINK.match(lines[inline_reply.start()].strip()))
-        if not links:
+    # Remove last quoted segment
+
+    # match from the end of the markers list
+    markers.reverse()
+
+    # match for unmarked quote following split
+    quotation = re.match(r'e*(te*)+(se*)+', markers)
+    if not quotation:
+
+        # match for inline replies
+        if re_orig.match(r'e*[mfts]*((te*)+(me*)+)+[mfts]*((se*)+|(me*){2,})', markers):
             return_flags[:] = [False, -1, -1]
-            return lines
+            return lines 
 
-    # cut out text lines coming after splitter if there are no markers there
-    quotation = re.search('(se*)+((t|f)+e*)+', markers)
+        # match for normal reply with quote
+        quotation = re_orig.match(r'e*(me*)+[mefts]*((se*)+|(me*){2,})', markers)
+
+    if not quotation:
+        # match for normal reply with quote and signature below quote
+        if re.match(r'e*(te*)+(me*)+.*(s)+e*(te*)+', markers):
+            quotation = re.match(r'e*(te*)+(me*)+.*(s)+', markers)
+
+    markers.reverse()
+
+    # If quotation, return it
     if quotation:
-        return_flags[:] = [True, quotation.start(), len(lines)]
-        return lines[:quotation.start()]
+        start = len(markers) - quotation.end() + 1
+        end = len(markers) - quotation.start() - 1
+        return_flags[:] = True, start, end
+        return lines[:start] + lines[end:]
 
-    # handle the case with markers
-    quotation = (RE_QUOTATION.search(markers) or
-                 RE_EMPTY_QUOTATION.search(markers))
-
-    if quotation:
-        return_flags[:] = True, quotation.start(1), quotation.end(1)
-        return lines[:quotation.start(1)] + lines[quotation.end(1):]
 
     return_flags[:] = [False, -1, -1]
     return lines
@@ -257,51 +303,68 @@ def extract_from_plain(msg_body):
     return msg_body
 
 
-def extract_from_html(msg_body):
+def extract_from_html(msg_body, placeholder=None):
     """
+    **modified significantly by Evan Lynch <evan.f.lynch@gmail.com> (January 2015)**
+
     Extract not quoted message from provided html message body
-    using tags and plain text algorithm.
+    using html tag-based and plaintext-based methods.
 
-    Cut out the 'blockquote', 'gmail_quote' tags.
-    Cut Microsoft quotations.
+    Runs all methods and uses the shortest valid solution.
 
-    Then use plain text algorithm to cut out splitter or
-    leftover quotation.
-    This works by adding checkpoint text to all html tags,
-    then converting html to text,
-    then extracting quotations from text,
-    then checking deleted checkpoints,
-    then deleting necessary tags.
+    args
+        msg_body: message body to extract from
+        placeholder: text which replaces extracted quote
+
     """
 
     if msg_body.strip() == '':
         return msg_body
 
-    html_tree = html.document_fromstring(
-        msg_body,
-        parser=html.HTMLParser(encoding="utf-8")
-    )
+    try:
+        html_tree = html.document_fromstring(
+            msg_body,
+            parser=html.HTMLParser(encoding="utf-8")
+        )
+    except etree.ParserError:
+        # Malformed HTML, don't try to strip.
+        return msg_body
 
-    cut_quotations = (html_quotations.cut_gmail_quote(html_tree) or
-                      html_quotations.cut_blockquote(html_tree) or
-                      html_quotations.cut_microsoft_quote(html_tree) or
-                      html_quotations.cut_by_id(html_tree) or
-                      html_quotations.cut_from_block(html_tree)
-                      )
+    methods = [
+        html_quotations.cut_gmail_quote,
+        html_quotations.cut_blockquote,
+        html_quotations.cut_microsoft_quote,
+        html_quotations.cut_by_id,
+        extract_from_html_by_plaintext
+    ]
 
+    results = []
+    for method in methods:
+        tree_copy = deepcopy(html_tree)
+        placeholder = deepcopy(placeholder)
+        if method(tree_copy, placeholder):
+            length = len(textify_html(html.tostring(tree_copy)).strip())
+            if length:
+                results.append((length, tree_copy, method))
+    if results:
+        # shortest result is best result
+        _, html_tree_copy, method = min(results, key=lambda x: x[0])
+        return html.tostring(html_tree_copy)
+
+    # Return original (no cuts made)
+    return msg_body
+
+def extract_from_html_by_plaintext(html_tree, placeholder):
     html_tree_copy = deepcopy(html_tree)
 
-    number_of_checkpoints = html_quotations.add_checkpoint(html_tree, 0)
+    number_of_checkpoints = html_quotations.add_checkpoint(html_tree_copy, 0)
     quotation_checkpoints = [False for i in xrange(number_of_checkpoints)]
-    msg_with_checkpoints = html.tostring(html_tree)
-
-    h = html2text.HTML2Text()
-    h.body_width = 0  # generate plain text without wrap
+    msg_with_checkpoints = html.tostring(html_tree_copy)
 
     # html2text adds unnecessary star symbols. Remove them.
     # Mask star symbols
     msg_with_checkpoints = msg_with_checkpoints.replace('*', '3423oorkg432')
-    plain_text = h.handle(msg_with_checkpoints)
+    plain_text = textify_html(msg_with_checkpoints)
     # Remove created star symbols
     plain_text = plain_text.replace('*', '')
     # Unmask saved star symbols
@@ -314,7 +377,7 @@ def extract_from_html(msg_body):
 
     # Don't process too long messages
     if len(lines) > MAX_LINES_COUNT:
-        return msg_body
+        return False
 
     # Collect checkpoints on each line
     line_checkpoints = [
@@ -331,35 +394,17 @@ def extract_from_html(msg_body):
     return_flags = []
     process_marked_lines(lines, markers, return_flags)
     lines_were_deleted, first_deleted, last_deleted = return_flags
+    if not lines_were_deleted:
+        return False
 
-    if lines_were_deleted:
-        #collect checkpoints from deleted lines
-        for i in xrange(first_deleted, last_deleted):
-            for checkpoint in line_checkpoints[i]:
-                quotation_checkpoints[checkpoint] = True
-    else:
-        if cut_quotations:
-            return html.tostring(html_tree_copy)
-        else:
-            return msg_body
+    #collect checkpoints from deleted lines
+    for i in xrange(first_deleted, last_deleted):
+        for checkpoint in line_checkpoints[i]:
+            quotation_checkpoints[checkpoint] = True
 
     # Remove tags with quotation checkpoints
-    html_quotations.delete_quotation_tags(
-        html_tree_copy, 0, quotation_checkpoints
-    )
-
-    return html.tostring(html_tree_copy)
-
-
-def is_splitter(line):
-    '''
-    Returns Matcher object if provided string is a splitter and
-    None otherwise.
-    '''
-    for pattern in SPLITTER_PATTERNS:
-        matcher = re.match(pattern, line)
-        if matcher:
-            return matcher
+    html_quotations.delete_quotation_tags(html_tree, quotation_checkpoints, placeholder)
+    return True
 
 
 def text_content(context):
