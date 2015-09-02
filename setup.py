@@ -25,7 +25,7 @@ setup(name='talon',
           "dnspython==1.11.1",
           "html2text",
           "nose==1.2.1",
-          "mock",
+          "mock==1.0.1",
           "coverage",
           "flanker",
           "cssselect"
